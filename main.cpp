@@ -1,5 +1,6 @@
-#include <gtest/gtest.h>
 #include <iostream>
+#include <vector>
+#include <gtest/gtest.h>
 #include "PackQueue.h"
 
 int main(int argc, char *argv[]) {
@@ -15,7 +16,7 @@ TEST(PackQueue, simple) {
     PackQueueSender<uint64_t> sender = queue.get_sender();
     PackQueueGetter<uint64_t> getter = queue.get_getter();
 
-    size_t upper_bound = 1000000000; //~8GB RAM
+    size_t upper_bound = 1000000000; //~8GB RAM | 99696ms R5 2600 4GHZ / 3400MHZ 14-15-14-28
     for (size_t i = 0; i < upper_bound; ++i) {
         sender.send(i);
     }
