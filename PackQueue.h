@@ -24,6 +24,9 @@ class PackQueueSender
     friend PackQueue<T>;
 public:
     ~PackQueueSender() {
+        if (!m_pack.empty()) {
+            forward();
+        }
         m_pack_queue.finish_confirmation();
     }
 
@@ -37,10 +40,7 @@ public:
 
         bool status = (m_pack.size() == m_pack_size || m_pack_size == 0);
         if (status) {
-            std::vector<T> package;
-            std::swap(package, m_pack);
-
-            m_pack_queue.push(package);
+            forward();
         }
 
         return status;
@@ -49,16 +49,23 @@ public:
     PackQueueSender() = delete;
 
     PackQueueSender(PackQueueSender&) = default;
-    PackQueueSender(PackQueueSender&&) = default;
+    PackQueueSender(PackQueueSender&&) noexcept = default;
     PackQueueSender(PackQueueSender const &) = default;
     PackQueueSender& operator=(PackQueueSender const &) = default;
-    PackQueueSender& operator=(PackQueueSender&&) = default;
+    PackQueueSender& operator=(PackQueueSender&&) noexcept = default;
 
 private:
     PackQueueSender(PackQueue<T>& pack_queue, size_t pack_size):
             m_pack_queue(pack_queue),
             m_pack_size(pack_size) {
     };
+
+    void forward() {
+        std::vector<T> package;
+        std::swap(package, m_pack);
+
+        m_pack_queue.push(package);
+    }
 
 private:
     const size_t m_pack_size;
@@ -83,10 +90,10 @@ public:
 
     PackQueueGetter() = delete;
     PackQueueGetter(PackQueueGetter&) = default;
-    PackQueueGetter(PackQueueGetter&&) = default;
+    PackQueueGetter(PackQueueGetter&&) noexcept = default;
     PackQueueGetter(PackQueueGetter const &) = default;
     PackQueueGetter& operator=(PackQueueGetter const &) = default;
-    PackQueueGetter& operator=(PackQueueGetter&&) = default;
+    PackQueueGetter& operator=(PackQueueGetter&&) noexcept = default;
 
 private:
     PackQueueGetter(PackQueue<T>& pack_queue, size_t pack_size):
@@ -119,13 +126,13 @@ public:
 #endif
     }
 
-    PackQueueSender<T> get_sender() {
+    PackQueueSender<T>* get_sender() {
 #ifdef DEBUG
         fast_debug_async_interval();
 #endif
 
         ++m_unfinished_count;
-        return PackQueueSender<T>(*this, m_push_pack_size);
+        return new PackQueueSender<T>(*this, m_push_pack_size);
     }
 
     PackQueueGetter<T> get_getter() {
@@ -145,47 +152,53 @@ private:
         fast_debug_async_interval();
 #endif
 
-        std::unique_lock<std::mutex> lck(m_mtx);
-        while (m_data.size() >= m_capacity) {
-            m_cv.wait(lck);
+        {
+            std::unique_lock<std::mutex> lck(m_mtx);
+            while (m_data.size() >= m_capacity) {
+                m_cv_write.wait(lck);
 
 #ifdef DEBUG
-            fast_debug_async_interval();
+                fast_debug_async_interval();
 #endif
-        }
+            }
 
-        for (auto item: pack) {
-            m_data.push(item);
+            for (auto item: pack) {
+                m_data.push(item);
+            }
         }
+        m_cv_read.notify_one();
     }
 
     std::vector<T> pop() {
+        std::vector<T> res;
 #ifdef DEBUG
         fast_debug_async_interval();
 #endif
 
-        std::unique_lock<std::mutex> lck(m_mtx);
+        {
+            std::unique_lock<std::mutex> lck(m_mtx);
 
 #ifdef DEBUG
-        while (
-                m_data.size() < m_pop_pack_size &&
-                debug_async_interval() &&
-                m_unfinished_count != 0
-                ) {
-            m_cv.wait(lck);
-            fast_debug_async_interval();
-        }
+            while (
+                    m_data.size() < m_pop_pack_size &&
+                    debug_async_interval() &&
+                    m_unfinished_count != 0
+                    ) {
+                m_cv.wait(lck);
+                fast_debug_async_interval();
+            }
 #else
-        while (m_data.size() < m_pop_pack_size && m_unfinished_count != 0) {
-            m_cv.wait(lck);
-        }
+            while (m_data.size() < m_pop_pack_size && m_unfinished_count != 0) {
+                m_cv_read.wait(lck);
+            }
 #endif
 
-        std::vector<T> res;
-        for (size_t i = 0; i < m_pop_pack_size && !m_data.empty(); ++i) {
-            res.push_back(m_data.front());
-            m_data.pop();
+            for (size_t i = 0; i < m_pop_pack_size && !m_data.empty(); ++i) {
+                res.push_back(m_data.front());
+                m_data.pop();
+            }
         }
+        m_cv_write.notify_one();
 
         return res;
     }
@@ -216,7 +229,8 @@ private:
 #endif
 
 private:
-    std::condition_variable m_cv;
+    std::condition_variable m_cv_write;
+    std::condition_variable m_cv_read;
     std::mutex m_mtx;
     std::queue<T> m_data;
 
